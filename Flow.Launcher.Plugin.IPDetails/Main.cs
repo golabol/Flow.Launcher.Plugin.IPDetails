@@ -76,8 +76,15 @@ namespace Flow.Launcher.Plugin.IPDetails
 
             try
             {
-                var response = await FetchIpApiResponse(await GenerateUrl(query.Search));
+                // Determine the target (IP or domain) for the API call
+                string apiTarget = await GetApiTargetAsync(query.Search);
 
+                // Build the URL using the determined target
+                string apiUrl = BuildApiUrl(apiTarget);
+
+                // Fetch data using the constructed URL
+                var response = await FetchIpApiResponse(apiUrl, cancellationToken); // Pass 
+                
                 // Remove the initial placeholder result
                 results.RemoveAt(0);
 
@@ -266,20 +273,105 @@ namespace Flow.Launcher.Plugin.IPDetails
             }
         }
 
-        private static async Task<string> GenerateUrl(string ip)
-        {
-            var (isValid, ipFormatted) = IsValidIPv4(ip);
+        // private static async Task<string> GenerateUrl(string ip)
+        // {
+        //     var (isValid, ipFormatted) = IsValidIPv4(ip);
 
-            if (string.IsNullOrEmpty(ip) || !isValid)
+        //     if (string.IsNullOrEmpty(ip) || !isValid)
+        //     {
+        //         ipFormatted = await GetPublicIpAddressAsync(); // Call the robust fetcher
+        //     }
+
+        //     var apiKeyQueryString = string.IsNullOrEmpty(_settings.ApiKey)
+        //         ? string.Empty
+        //         : $"&key={_settings.ApiKey}";
+
+        //     return $"https://api.ipapi.is/?q={ipFormatted}{apiKeyQueryString}";
+        // }
+
+        private static async Task<string> GetApiTargetAsync(string userInput)
+        {
+            string target = userInput?.Trim() ?? string.Empty;
+
+            // --- Input Cleaning ---
+            if (Uri.TryCreate(target, UriKind.Absolute, out var uri) && (uri.Scheme == "http" || uri.Scheme == "https://"))
             {
-                ipFormatted = await GetPublicIpAddressAsync(); // Call the robust fetcher
+                // If it's a valid URL, use the host part
+                target = uri.DnsSafeHost;
+            }
+            else
+            {
+                // Remove potential schema manually if Uri.TryCreate failed but it looks like a URL start
+                if (target.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                    target = target.Substring(7);
+                else if (target.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                    target = target.Substring(8);
+
+                // Remove trailing slash if present
+                target = target.TrimEnd('/');
+                // Remove path part if contains slash after cleaning schema/trailing slash
+                int pathSeparatorIndex = target.IndexOf('/');
+                if (pathSeparatorIndex >= 0)
+                {
+                    target = target.Substring(0, pathSeparatorIndex);
+                }
             }
 
-            var apiKeyQueryString = string.IsNullOrEmpty(_settings.ApiKey)
+            // Remove potential port number (ipapi.is doesn't use it)
+            int portSeparatorIndex = target.LastIndexOf(':');
+            // Avoid treating IPv6 colons as port separators
+            if (portSeparatorIndex > 0 && target.IndexOf(']') < portSeparatorIndex)
+            {
+                 target = target.Substring(0, portSeparatorIndex);
+            }
+
+
+            // --- Target Determination ---
+            if (string.IsNullOrEmpty(target))
+            {
+                // Case 1: Empty input -> Get own public IP
+                return await GetPublicIpAddressAsync() ?? throw new Exception("Failed to determine own public IP and input was empty."); // Throw if own IP fails
+            }
+
+            if (IPAddress.TryParse(target, out var ipAddress))
+            {
+                // Case 2: Input is an IP address
+                if (IsPublicIp(ipAddress))
+                {
+                    // It's a valid public IP (v4 or v6)
+                    return ipAddress.ToString();
+                }
+                else
+                {
+                    // It's a private, loopback, or otherwise non-public IP.
+                    // Let ipapi.is handle it, it might give some info or an error.
+                    return ipAddress.ToString();
+                     // ---- Alternative: Treat non-public IPs like empty input ----
+                     // Console.WriteLine($"Input is a non-public IP ({ipAddress}), fetching own public IP instead.");
+                     // return await GetPublicIpAddressAsync() ?? throw new Exception("Failed to determine own public IP and input was a non-public IP.");
+                     // ---- Choose the alternative above if you PREFER to show your own IP details when a private IP is entered ----
+                }
+            }
+            else
+            {
+                // Case 3: Input is not an IP address -> Assume domain/hostname
+                return target; // Pass the domain/hostname directly to the API
+            }
+        }
+
+        // ADD this new helper method to build the final URL
+        private static string BuildApiUrl(string target)
+        {
+             var apiKeyQueryString = string.IsNullOrEmpty(_settings.ApiKey)
                 ? string.Empty
                 : $"&key={_settings.ApiKey}";
 
-            return $"https://api.ipapi.is/?q={ipFormatted}{apiKeyQueryString}";
+            // URL encode the target in case it's a domain with special characters (less common but safer)
+            // However, ipapi.is seems fine without encoding simple domains/IPs. Let's skip encoding for now.
+            // string encodedTarget = Uri.EscapeDataString(target);
+            // return $"https://api.ipapi.is/?q={encodedTarget}{apiKeyQueryString}";
+
+            return $"https://api.ipapi.is/?q={target}{apiKeyQueryString}";
         }
 
         private static (bool, string) IsValidIPv4(string ipString)
