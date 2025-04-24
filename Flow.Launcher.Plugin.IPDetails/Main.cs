@@ -78,7 +78,7 @@ namespace Flow.Launcher.Plugin.IPDetails
             try
             {
                 // Determine the target (IP or domain) for the API call
-                apiTarget = await GetApiTargetAsync(query.Search);
+                apiTarget = await GetApiTargetAsync(query.Search, cancellationToken);
 
                 // Build the URL using the determined target
                 string apiUrl = BuildApiUrl(apiTarget);
@@ -347,73 +347,85 @@ namespace Flow.Launcher.Plugin.IPDetails
         //     return $"https://api.ipapi.is/?q={ipFormatted}{apiKeyQueryString}";
         // }
 
-        private static async Task<string> GetApiTargetAsync(string userInput)
+        private static async Task<string> GetApiTargetAsync(string userInput, CancellationToken cancellationToken)
         {
             string target = userInput?.Trim() ?? string.Empty;
 
-            // --- Input Cleaning ---
+            // --- Input Cleaning (remains the same) ---
             if (Uri.TryCreate(target, UriKind.Absolute, out var uri) && (uri.Scheme == "http" || uri.Scheme == "https://"))
             {
-                // If it's a valid URL, use the host part
                 target = uri.DnsSafeHost;
             }
             else
             {
-                // Remove potential schema manually if Uri.TryCreate failed but it looks like a URL start
                 if (target.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
                     target = target.Substring(7);
                 else if (target.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                     target = target.Substring(8);
 
-                // Remove trailing slash if present
                 target = target.TrimEnd('/');
-                // Remove path part if contains slash after cleaning schema/trailing slash
                 int pathSeparatorIndex = target.IndexOf('/');
                 if (pathSeparatorIndex >= 0)
                 {
                     target = target.Substring(0, pathSeparatorIndex);
                 }
             }
-
-            // Remove potential port number (ipapi.is doesn't use it)
             int portSeparatorIndex = target.LastIndexOf(':');
-            // Avoid treating IPv6 colons as port separators
             if (portSeparatorIndex > 0 && target.IndexOf(']') < portSeparatorIndex)
             {
                  target = target.Substring(0, portSeparatorIndex);
             }
 
-
             // --- Target Determination ---
             if (string.IsNullOrEmpty(target))
             {
                 // Case 1: Empty input -> Get own public IP
-                return await GetPublicIpAddressAsync() ?? throw new Exception("Failed to determine own public IP and input was empty."); // Throw if own IP fails
+                // Use the GetPublicIpAddressAsync defined earlier
+                return await GetPublicIpAddressAsync() ?? throw new Exception("Failed to determine own public IP and input was empty.");
             }
 
             if (IPAddress.TryParse(target, out var ipAddress))
             {
                 // Case 2: Input is an IP address
-                if (IsPublicIp(ipAddress))
-                {
-                    // It's a valid public IP (v4 or v6)
-                    return ipAddress.ToString();
-                }
-                else
-                {
-                    // It's a private, loopback, or otherwise non-public IP.
-                    // Let ipapi.is handle it, it might give some info or an error.
-                    return ipAddress.ToString();
-                     // ---- Alternative: Treat non-public IPs like empty input ----
-                     // Console.WriteLine($"Input is a non-public IP ({ipAddress}), fetching own public IP instead.");
-                     // return await GetPublicIpAddressAsync() ?? throw new Exception("Failed to determine own public IP and input was a non-public IP.");
-                     // ---- Choose the alternative above if you PREFER to show your own IP details when a private IP is entered ----
-                }
+                // No need to check if public here, let ipapi.is handle all IP types directly
+                return ipAddress.ToString();
             }
             else
             {
-                // Case 3: Input is not an IP address -> Assume domain/hostname
-                return target; // Pass the domain/hostname directly to the API
+                // Case 3: Input is not an IP address -> Assume domain/hostname and perform DNS lookup
+                try
+                {
+                    // Perform DNS lookup asynchronously
+                    IPAddress[] addresses = await Dns.GetHostAddressesAsync(target, cancellationToken);
+
+                    if (addresses == null || addresses.Length == 0)
+                    {
+                        throw new Exception($"No IP addresses found for host: {target}");
+                    }
+
+                    // --- Select the best IP address ---
+                    // Prioritize Public IPv4, then Public IPv6, then first available.
+                    IPAddress selectedIp = addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork && IsPublicIp(ip)) // Public IPv4
+                                        ?? addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetworkV6 && IsPublicIp(ip)) // Public IPv6
+                                        ?? addresses.FirstOrDefault(IsPublicIp) // Any Public IP
+                                        ?? addresses.First(); // Fallback to the very first IP found
+
+                    return selectedIp.ToString();
+                }
+                catch (SocketException ex)
+                {
+                    // Common exception for DNS resolution failures (host not found, DNS server error)
+                    throw new Exception($"Could not resolve host: {target}. Check the name or your network connection. (Error: {ex.SocketErrorCode})");
+                }
+                catch (OperationCanceledException)
+                {
+                     // Rethrow cancellation if DNS lookup itself was cancelled
+                     throw;
+                }
+                catch (Exception ex) // Catch other potential errors during DNS lookup
+                {
+                    throw new Exception($"An unexpected error occurred while resolving host: {target}.");
+                }
             }
         }
 
