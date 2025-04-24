@@ -158,7 +158,12 @@ namespace Flow.Launcher.Plugin.IPDetails
                     }
                 }
                 else {
-                     Context.API.LogWarn(nameof(Main), $"Location info missing in API response for {apiTarget}.");
+                     fetchedResults.Add(new Result
+                     {
+                         Title = $"Location info missing in API response for {apiTarget}.",
+                         SubTitle = "Location",
+                         IcoPath = Icon
+                     });
                 }
 
                 // Check if Asn is null before accessing its properties
@@ -173,7 +178,12 @@ namespace Flow.Launcher.Plugin.IPDetails
                         Score = 97
                     });
                 } else {
-                     Context.API.LogWarn(nameof(Main), $"ASN info missing in API response for {apiTarget}.");
+                     fetchedResults.Add(new Result
+                     {
+                         Title = $"ASN info missing in API response for {apiTarget}.",
+                         SubTitle = "ISP / Organization",
+                         IcoPath = Icon
+                     });
                 }
 
                  // --- Flags processing ---
@@ -206,13 +216,11 @@ namespace Flow.Launcher.Plugin.IPDetails
             catch (OperationCanceledException)
             {
                  // Query was cancelled (e.g., user typed something else)
-                 Context.API.LogInfo(nameof(Main), "IP details query cancelled.");
                  // Return empty list or a specific cancellation message
                  fetchedResults.Add(new Result { Title = "IP details query cancelled", SubTitle = $"Query: {apiTarget}", IcoPath = Icon });
             }
             catch (Exception ex)
             {
-                Context.API.LogWarn(nameof(Main), $"Error fetching IP details for '{apiTarget}': {ex.Message}", ex);
                 // Ensure the placeholder is removed and error is shown
                 fetchedResults.Clear(); // Clear any partial results
                 fetchedResults.Add(new Result
@@ -229,7 +237,6 @@ namespace Flow.Launcher.Plugin.IPDetails
              if (!fetchedResults.Any())
              {
                 // Should generally not happen due to error handling, but as a fallback
-                 Context.API.LogWarn(nameof(Main), $"Query for '{apiTarget}' yielded no results or errors.");
                  fetchedResults.Add(new Result { Title = "No results found", SubTitle = $"Query: {apiTarget}", IcoPath = Icon });
              }
 
@@ -528,7 +535,6 @@ namespace Flow.Launcher.Plugin.IPDetails
             // Check cache first (cache key IS the full URL including API key if present)
             if (TryGetCachedResponse(url, out IpApiResponse cachedResponse))
             {
-                Context.API.LogInfo(nameof(Main), $"Cache hit for URL: {url}");
                 return cachedResponse;
             }
 
@@ -537,7 +543,6 @@ namespace Flow.Launcher.Plugin.IPDetails
 
             if (string.IsNullOrWhiteSpace(responseString))
             {
-                 Context.API.LogWarn(nameof(Main), $"API returned empty response for URL: {url}");
                  return null; // Or throw, or return an empty object depending on desired handling
             }
 
@@ -549,15 +554,10 @@ namespace Flow.Launcher.Plugin.IPDetails
                 {
                     CacheResponse(url, apiResponse); // Cache the valid response
                 }
-                else
-                {
-                     Context.API.LogWarn(nameof(Main), $"Failed to deserialize API response for URL: {url}");
-                }
                 return apiResponse;
             }
             catch (JsonException jsonEx)
             {
-                 Context.API.LogWarn(nameof(Main), $"JSON Deserialization error for URL {url}: {jsonEx.Message}", jsonEx);
                  // Optionally log responseString here (beware of sensitive data if API key included)
                  throw new Exception($"Failed to parse API response. Please check logs. (URL: {url})", jsonEx); // Re-throw with more context
             }
