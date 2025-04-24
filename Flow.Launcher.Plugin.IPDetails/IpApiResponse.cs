@@ -136,26 +136,3 @@ public class LocationInfo
     [JsonPropertyName("accuracy")] public int? Accuracy { get; set; } // Made nullable
     // [JsonPropertyName("other")] public List<string> Other { get; set; } // Optional
 }
-
-// --- IsVpnConverter (Ensure it exists and handles bool/string/null) ---
-public class IsVpnConverter : JsonConverter<object>
-{
-     public override object Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-     {
-         switch (reader.TokenType)
-         {
-             case JsonTokenType.True: return true;
-             case JsonTokenType.False: return false;
-             case JsonTokenType.String: return reader.GetString(); // Can be bool string or other
-             case JsonTokenType.Null: return null;
-             default:
-                 reader.Skip();
-                 return null;
-         }
-     }
-
-     public override void Write(Utf8JsonWriter writer, object value, JsonSerializerOptions options)
-     {
-         JsonSerializer.Serialize(writer, value, value?.GetType() ?? typeof(object), options);
-     }
-}
