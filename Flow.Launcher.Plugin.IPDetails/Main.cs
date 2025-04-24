@@ -64,12 +64,13 @@ namespace Flow.Launcher.Plugin.IPDetails
         /// <inheritdoc />
         public async Task<List<Result>> QueryAsync(Query query, CancellationToken cancellationToken)
         {
-            var results = new List<Result>
+            string apiTarget = query.Search ?? "your public IP"; // Default display target
+            var fetchedResults = new List<Result>
             {
                 new()
                 {
                     Title = "Fetching IP details...",
-                    SubTitle = "Please wait",
+                    SubTitle = $"Looking up: {apiTarget}", // Use display target
                     IcoPath = Icon
                 }
             };
@@ -83,106 +84,156 @@ namespace Flow.Launcher.Plugin.IPDetails
                 string apiUrl = BuildApiUrl(apiTarget);
 
                 // Fetch data using the constructed URL
-                var response = await FetchIpApiResponse(apiUrl, cancellationToken); // Pass 
-                
-                // Remove the initial placeholder result
-                results.RemoveAt(0);
+                var response = await FetchIpApiResponse(apiUrl, cancellationToken);
 
-                results.Add(new Result
+                // Remove the initial placeholder result
+                fetchedResults.RemoveAt(0);
+
+                if (response == null || string.IsNullOrEmpty(response.Ip))
                 {
-                    Title = response.Ip,
-                    SubTitle = "Public IP",
+                    // Handle cases where the API call succeeded but returned minimal/no useful data
+                     fetchedResults.Add(new Result
+                     {
+                         Title = $"No details found for: {apiTarget}",
+                         SubTitle = "The API might not have information for this IP/domain, or the response was empty.",
+                         IcoPath = Icon,
+                         Score = 99
+                     });
+                     return fetchedResults; // Return early if no core IP info
+                }
+                
+                fetchedResults.Add(new Result
+                {
+                    Title = response.Ip, // API response should have the resolved IP
+                    SubTitle = $"Details for: {apiTarget}", // Show what was originally looked up
                     IcoPath = Icon,
                     Action = CreateCopyAction(response.Ip),
                     Score = 99
                 });
 
-                var location = string.Join(", ",
-                    new[] { response.Location.City, response.Location.State, response.Location.Country }
-                        .Where(l => !string.IsNullOrEmpty(l)));
-
-                results.Add(new Result
+                // Check if Location is null before accessing its properties
+                if (response.Location != null)
                 {
-                    Title = location,
-                    SubTitle = "Location",
-                    IcoPath = Icon,
-                    Action = CreateCopyAction(location),
-                    Score = 98
-                });
+                    var locationParts = new[] { response.Location.City, response.Location.State, response.Location.Country };
+                    var location = string.Join(", ", locationParts.Where(l => !string.IsNullOrEmpty(l)));
 
-                results.Add(new Result
+                    if (!string.IsNullOrWhiteSpace(location))
+                    {
+                        fetchedResults.Add(new Result
+                        {
+                            Title = location,
+                            SubTitle = "Location",
+                            IcoPath = Icon,
+                            Action = CreateCopyAction(location),
+                            Score = 98
+                        });
+                    }
+
+                     if (!string.IsNullOrWhiteSpace(response.Location.Timezone))
+                     {
+                        fetchedResults.Add(new Result
+                        {
+                            Title = response.Location.Timezone,
+                            SubTitle = "Timezone" + (!string.IsNullOrWhiteSpace(response.Location.LocalTime) ? $" / {response.Location.LocalTime}" : ""),
+                            IcoPath = Icon,
+                            Action = CreateCopyAction(response.Location.Timezone),
+                            Score = 96
+                        });
+                     }
+
+                     if (response.Location.Latitude != 0 || response.Location.Longitude != 0)
+                     {
+                         var googleMapsLink = GenerateGoogleMapsLink(response.Location.LatitudeFormatted,
+                             response.Location.LongitudeFormatted);
+
+                         fetchedResults.Add(new Result
+                         {
+                             Title =
+                                 $"Lat: {response.Location.LatitudeFormatted}, Lon: {response.Location.LongitudeFormatted}",
+                             SubTitle = "Click to view coordinate on Google Maps",
+                             IcoPath = Icon,
+                             Action = CreateOpenBrowserAction(googleMapsLink),
+                             Score = 90
+                         });
+                    }
+                }
+                else {
+                     Context.API.LogWarn(nameof(Main), $"Location info missing in API response for {apiTarget}.");
+                }
+
+                // Check if Asn is null before accessing its properties
+                if (response.Asn != null && !string.IsNullOrWhiteSpace(response.Asn.Org))
                 {
-                    Title = response.Asn.Org,
-                    SubTitle = "ISP",
-                    IcoPath = Icon,
-                    Action = CreateCopyAction(response.Asn.Org),
-                    Score = 97
-                });
+                    fetchedResults.Add(new Result
+                    {
+                        Title = response.Asn.Org,
+                        SubTitle = "ISP / Organization",
+                        IcoPath = Icon,
+                        Action = CreateCopyAction(response.Asn.Org),
+                        Score = 97
+                    });
+                } else {
+                     Context.API.LogWarn(nameof(Main), $"ASN info missing in API response for {apiTarget}.");
+                }
 
-                results.Add(new Result
-                {
-                    Title = response.Location.Timezone,
-                    SubTitle = "Timezone / " + response.Location.LocalTime,
-                    IcoPath = Icon,
-                    Action = CreateCopyAction(response.Location.Timezone),
-                    Score = 96
-                });
+                 // --- Flags processing ---
+                 var isVpnFromBoolean = response.IsVpn is bool vpnBool && vpnBool;
+                 var isVpnProviderAvailable = response.IsVpn is string vpnString && !string.IsNullOrWhiteSpace(vpnString);
+                 var isVpnString = isVpnFromBoolean ? "VPN Detected" : (isVpnProviderAvailable ? response.IsVpn.ToString() : string.Empty);
 
-                var isVpnFromBoolean = response.IsVpn is true;
-                var isVpnProviderAvailable = response.IsVpn is string;
-
-                var isVpnString = isVpnFromBoolean
-                    ? "VPN"
-                    : isVpnProviderAvailable
-                        ? response.IsVpn.ToString()
-                        : string.Empty;
-
-                var flags = new (string Title, bool IsValid, string Subtitle)[]
-                {
-                    ("Bogon", response.IsBogon, "IP is bogon (non-routable)"),
+                 var flags = new (string Title, bool IsValid, string Subtitle)[]
+                 {
+                    ("Bogon", response.IsBogon, "IP is bogon (e.g., private, reserved)"),
                     ("Mobile", response.IsMobile, "IP is mobile (belongs to a mobile ISP)"),
-                    ("Crawler", response.IsCrawler, "IP belongs to a crawler / spider / good bot"),
+                    ("Crawler", response.IsCrawler, "IP belongs to a crawler / spider / bot"),
                     ("Datacenter", response.IsDatacenter, "IP belongs to a Hosting Provider / Datacenter"),
                     ("Tor", response.IsTor, "IP is a TOR exit node"),
                     ("Proxy", response.IsProxy, "IP is a proxy"),
-                    (isVpnString, isVpnFromBoolean || isVpnProviderAvailable, "IP is a VPN"),
-                    ("Abuser", response.IsAbuser, "IP detected as an abuser / attacker")
-                };
+                    (isVpnString, !string.IsNullOrEmpty(isVpnString), isVpnProviderAvailable ? $"VPN Provider: {isVpnString}" : "IP is likely a VPN"),
+                    ("Abuser", response.IsAbuser, "IP detected on abuse blacklists")
+                 };
 
-                results.AddRange(flags.Where(flag => flag.IsValid)
-                    .Select(flag => new Result
-                    {
-                        Title = flag.Title,
-                        SubTitle = flag.Subtitle,
-                        IcoPath = Icon,
-                        Action = CreateCopyAction(flag.Subtitle),
-                        Score = 95
-                    }));
-
-                var googleMapsLink = GenerateGoogleMapsLink(response.Location.LatitudeFormatted,
-                    response.Location.LongitudeFormatted);
-
-                results.Add(new Result
-                {
-                    Title =
-                        $"Latitude: {response.Location.LatitudeFormatted}, Longitude: {response.Location.LongitudeFormatted}",
-                    SubTitle = "Click to view coordinate on Google Maps",
-                    IcoPath = Icon,
-                    Action = CreateOpenBrowserAction(googleMapsLink),
-                });
+                 fetchedResults.AddRange(flags.Where(flag => flag.IsValid && !string.IsNullOrEmpty(flag.Title))
+                     .Select(flag => new Result
+                     {
+                         Title = flag.Title,
+                         SubTitle = flag.Subtitle,
+                         IcoPath = Icon,
+                         Action = CreateCopyAction(flag.Title + ": " + flag.Subtitle),
+                         Score = 95 // Assign consistent score for flags
+                     }));
+            }
+            catch (OperationCanceledException)
+            {
+                 // Query was cancelled (e.g., user typed something else)
+                 Context.API.LogInfo(nameof(Main), "IP details query cancelled.");
+                 // Return empty list or a specific cancellation message
+                 fetchedResults.Add(new Result { Title = "IP details query cancelled", SubTitle = $"Query: {apiTarget}", IcoPath = Icon });
             }
             catch (Exception ex)
             {
-                results.Add(new Result
+                Context.API.LogError(nameof(Main), $"Error fetching IP details for '{apiTarget}': {ex.Message}", ex);
+                // Ensure the placeholder is removed and error is shown
+                fetchedResults.Clear(); // Clear any partial results
+                fetchedResults.Add(new Result
                 {
-                    Title = "An error occurred while fetching IP details",
-                    SubTitle = ex.Message,
+                    Title = $"Error fetching details for: {apiTarget}",
+                    SubTitle = ex.Message, // Show the error message simply
                     IcoPath = Icon,
-                    Action = CreateCopyAction(ex.Message)
+                    Action = CreateCopyAction($"Target: {apiTarget}\nError: {ex.Message}\n{ex.StackTrace}"), // Copy full error details
+                    Score = 100 // Ensure error shows prominently
                 });
             }
 
-            return results;
+            // Return the final list of results (either details or an error message)
+             if (!fetchedResults.Any())
+             {
+                // Should generally not happen due to error handling, but as a fallback
+                 Context.API.LogWarn(nameof(Main), $"Query for '{apiTarget}' yielded no results or errors.");
+                 fetchedResults.Add(new Result { Title = "No results found", SubTitle = $"Query: {apiTarget}", IcoPath = Icon });
+             }
+
+            return fetchedResults;
         }
 
         private static Func<ActionContext, bool> CreateCopyAction(string text)
@@ -374,49 +425,144 @@ namespace Flow.Launcher.Plugin.IPDetails
             return $"https://api.ipapi.is/?q={target}{apiKeyQueryString}";
         }
 
-        private static (bool, string) IsValidIPv4(string ipString)
+        /// <summary>
+        /// Checks if an IP address is likely a public, routable address.
+        /// Handles both IPv4 and IPv6. Checks against loopback, private ranges, link-local, etc.
+        /// </summary>
+        /// <param name="ip">The IPAddress to check.</param>
+        /// <returns>True if the IP is considered public, false otherwise.</returns>
+        private static bool IsPublicIp(IPAddress ip)
         {
-            var splitValues = ipString.Split('.');
+            if (ip == null) return false;
 
-            if (splitValues.Length != 4)
+            // Use built-in checks first
+            if (IPAddress.IsLoopback(ip)) return false;
+            if (ip.IsIPv6LinkLocal) return false;
+            if (ip.IsIPv6SiteLocal) return false; // Obsolete but still checkable
+            if (ip.IsIPv6Multicast) return false;
+            // Note: IsIPv6Teredo might be public in some contexts, but often NAT-traversal related. Treat as non-public for simplicity.
+            if (ip.IsIPv6Teredo) return false;
+            if (ip.IsIPv6UniqueLocal) return false;
+
+
+            // Manual IPv4 Private Range Checks (more specific than some built-ins might be)
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
             {
-                return (false, string.Empty);
+                 byte[] bytes = ip.GetAddressBytes();
+                 switch (bytes[0])
+                 {
+                     case 0: // Current network (invalid as source/destination)
+                         return false;
+                     case 10: // Class A Private
+                         return false;
+                     case 100 when (bytes[1] >= 64 && bytes[1] <= 127): // Shared Address Space (RFC 6598) - Treat as private/non-public
+                         return false;
+                     case 127: // Loopback (already covered by IsLoopback)
+                         return false;
+                     case 169 when bytes[1] == 254: // APIPA Link-local
+                         return false;
+                     case 172 when (bytes[1] >= 16 && bytes[1] <= 31): // Class B Private
+                         return false;
+                     case 192 when bytes[1] == 0 && bytes[2] == 0: // Reserved (IETF Protocol Assignments)
+                         return false;
+                     case 192 when bytes[1] == 0 && bytes[2] == 2: // Test-Net-1 (RFC 5737)
+                         return false;
+                     case 192 when bytes[1] == 88 && bytes[2] == 99: // 6to4 Relay Anycast (RFC 3068) - Treat as non-public infra
+                         return false;
+                     case 192 when bytes[1] == 168: // Class C Private
+                         return false;
+                     case 198 when bytes[1] == 18 || bytes[1] == 19: // Test-Net-2 & 3 (RFC 5737)
+                         return false;
+                     case 198 when bytes[1] == 51 && bytes[2] == 100: // Documentation (TEST-NET-2 - RFC 5737)
+                         return false;
+                     case 203 when bytes[1] == 0 && bytes[2] == 113: // Documentation (TEST-NET-3 - RFC 5737)
+                         return false;
+                     case >= 224 and <= 239: // Multicast (Class D)
+                         return false;
+                     case >= 240: // Reserved (Class E), Broadcast (255.255.255.255)
+                         return false;
+                     default:
+                         return true; // Assume public if not caught by specific ranges
+                 }
+            }
+            // IPv6 Checks (after built-ins)
+            else if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+            {
+                 // Check for IPv4 mapped addresses (::ffff:x.y.z.w) and check the IPv4 part recursively
+                 if (ip.IsIPv4MappedToIPv6)
+                 {
+                    // Extract the IPv4 part - This is tricky to do directly with GetAddressBytes reliably.
+                    // A common way is to convert back to string and parse, or use internal methods if available.
+                    // Simplification: If IPAddress thinks it's mapped, let's try converting it.
+                    // This might not be the most efficient way.
+                    try {
+                        byte[] ipv6Bytes = ip.GetAddressBytes();
+                        byte[] ipv4Bytes = new byte[4];
+                        Buffer.BlockCopy(ipv6Bytes, 12, ipv4Bytes, 0, 4);
+                        var ipv4Part = new IPAddress(ipv4Bytes);
+                        return IsPublicIp(ipv4Part); // Recursive call
+                    } catch {
+                        return false; // Error during extraction, treat as non-public
+                    }
+                 }
+
+                 // Add specific IPv6 Bogons if needed, e.g., Documentation range 2001:db8::/32
+                 byte[] v6bytes = ip.GetAddressBytes();
+                 if (v6bytes[0] == 0x20 && v6bytes[1] == 0x01 && v6bytes[2] == 0x0d && v6bytes[3] == 0xb8) // 2001:db8::/32
+                 {
+                    return false;
+                 }
+
+                 // Add more specific ranges here if needed (e.g., ::/8, fc00::/7 Unique Local)
+
+                 // If none of the specific non-public checks passed, assume it's public IPv6
+                 return true;
             }
 
-            if (!IPAddress.TryParse(ipString, out var ipAddress))
-            {
-                return (false, string.Empty);
-            }
-
-            if (ipAddress.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
-            {
-                return (false, string.Empty);
-            }
-
-            if (IsPrivateOrBogonIp(ipAddress))
-            {
-                return (false, string.Empty);
-            }
-
-            return (true, ipAddress.ToString());
+            // Unknown address family
+            return false;
         }
 
-        private static async Task<IpApiResponse> FetchIpApiResponse(string url)
+        private static async Task<IpApiResponse> FetchIpApiResponse(string url, CancellationToken cancellationToken)
         {
+            // Check cache first (cache key IS the full URL including API key if present)
             if (TryGetCachedResponse(url, out IpApiResponse cachedResponse))
             {
+                Context.API.LogInfo(nameof(Main), $"Cache hit for URL: {url}");
                 return cachedResponse;
             }
 
-            var responseString = await HttpClient.GetStringAsync(url);
+            // Use the CancellationToken in the HttpClient request
+            var responseString = await HttpClient.GetStringAsync(url, cancellationToken);
 
-            var apiResponse = JsonSerializer.Deserialize<IpApiResponse>(responseString, JsonSerializerOptions);
+            if (string.IsNullOrWhiteSpace(responseString))
+            {
+                 Context.API.LogWarn(nameof(Main), $"API returned empty response for URL: {url}");
+                 return null; // Or throw, or return an empty object depending on desired handling
+            }
 
-            CacheResponse(url, apiResponse);
+            try
+            {
+                var apiResponse = JsonSerializer.Deserialize<IpApiResponse>(responseString, JsonSerializerOptions);
 
-            return apiResponse;
+                if (apiResponse != null)
+                {
+                    CacheResponse(url, apiResponse); // Cache the valid response
+                }
+                else
+                {
+                     Context.API.LogWarn(nameof(Main), $"Failed to deserialize API response for URL: {url}");
+                }
+                return apiResponse;
+            }
+            catch (JsonException jsonEx)
+            {
+                 Context.API.LogError(nameof(Main), $"JSON Deserialization error for URL {url}: {jsonEx.Message}", jsonEx);
+                 // Optionally log responseString here (beware of sensitive data if API key included)
+                 throw new Exception($"Failed to parse API response. Please check logs. (URL: {url})", jsonEx); // Re-throw with more context
+            }
         }
-
+        
         private static bool TryGetCachedResponse(string url, out IpApiResponse cachedResponse)
         {
             cachedResponse = null;
@@ -481,25 +627,6 @@ namespace Flow.Launcher.Plugin.IPDetails
             };
 
             File.WriteAllText(_cacheFilePath, JsonSerializer.Serialize(cacheData));
-        }
-
-        private static bool IsPrivateOrBogonIp(IPAddress ip)
-        {
-            var bytes = ip.GetAddressBytes();
-            switch (bytes[0])
-            {
-                case 10 or 127:
-                case 172 when bytes[1] >= 16 && bytes[1] <= 31:
-                case 192 when bytes[1] == 168:
-                case 169 when bytes[1] == 254:
-                case 100 when bytes[1] >= 64 && bytes[1] <= 127:
-                case 198 when bytes[1] == 18 || bytes[1] == 19 || bytes[1] == 51 || bytes[1] == 52:
-                case 203 when bytes[1] == 0 && bytes[2] == 113:
-                case 240 or 255:
-                    return true;
-                default:
-                    return false;
-            }
         }
 
         /// <inheritdoc />
