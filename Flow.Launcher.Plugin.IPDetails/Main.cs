@@ -78,7 +78,7 @@ namespace Flow.Launcher.Plugin.IPDetails
             try
             {
                 // Determine the target (IP or domain) for the API call
-                string apiTarget = await GetApiTargetAsync(query.Search);
+                apiTarget = await GetApiTargetAsync(query.Search);
 
                 // Build the URL using the determined target
                 string apiUrl = BuildApiUrl(apiTarget);
@@ -212,7 +212,7 @@ namespace Flow.Launcher.Plugin.IPDetails
             }
             catch (Exception ex)
             {
-                Context.API.LogError(nameof(Main), $"Error fetching IP details for '{apiTarget}': {ex.Message}", ex);
+                Context.API.LogWarn(nameof(Main), $"Error fetching IP details for '{apiTarget}': {ex.Message}", ex);
                 // Ensure the placeholder is removed and error is shown
                 fetchedResults.Clear(); // Clear any partial results
                 fetchedResults.Add(new Result
@@ -557,7 +557,7 @@ namespace Flow.Launcher.Plugin.IPDetails
             }
             catch (JsonException jsonEx)
             {
-                 Context.API.LogError(nameof(Main), $"JSON Deserialization error for URL {url}: {jsonEx.Message}", jsonEx);
+                 Context.API.LogWarn(nameof(Main), $"JSON Deserialization error for URL {url}: {jsonEx.Message}", jsonEx);
                  // Optionally log responseString here (beware of sensitive data if API key included)
                  throw new Exception($"Failed to parse API response. Please check logs. (URL: {url})", jsonEx); // Re-throw with more context
             }
