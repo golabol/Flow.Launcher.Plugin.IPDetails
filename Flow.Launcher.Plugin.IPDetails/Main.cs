@@ -217,7 +217,7 @@ namespace Flow.Launcher.Plugin.IPDetails
                     try
                     {
                         // Make the request with the cancellation token
-                        string potentialIp = (await httpClient.GetStringAsync(url, cts.Token)).Trim();
+                        string potentialIp = (await HttpClient.GetStringAsync(url, cts.Token)).Trim();
     
                         // Basic validation: Check if the response looks like a valid IP address
                         if (!string.IsNullOrEmpty(potentialIp) && IPAddress.TryParse(potentialIp, out _))
