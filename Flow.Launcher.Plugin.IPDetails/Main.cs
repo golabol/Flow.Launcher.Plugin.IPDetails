@@ -65,30 +65,30 @@ namespace Flow.Launcher.Plugin.IPDetails
         /// <inheritdoc />
         public async Task<List<Result>> QueryAsync(Query query, CancellationToken cancellationToken)
         {
-            string apiTarget = query.Search ?? "your public IP"; // Default display target
-            var fetchedResults = new List<Result>
-            {
-                new()
-                {
-                    Title = "Fetching IP details...",
-                    SubTitle = $"Looking up: {apiTarget}", // Use display target
-                    IcoPath = Icon
-                }
-            };
+            string originalInput = query.Search ?? "your public IP"; // Keep original input for display
+            string apiTarget = originalInput; // Initialize apiTarget
+            var fetchedResults = new List<Result>(); // Start fresh list for results
+
+            // --- Initial Placeholder ---
+             /*fetchedResults.Add(new Result
+             {
+                 Title = "Fetching IP details...",
+                 SubTitle = $"Looking up: {originalInput}",
+                 IcoPath = Icon,
+                 Score = 110 // High score to show first
+             });*/
+             // If you want instant placeholder, return here and update later.
+             // await Task.Yield(); // Maybe yield to allow UI update
 
             try
             {
-                // Determine the target (IP or domain) for the API call
+                // Determine the target IP for the API call
                 apiTarget = await GetApiTargetAsync(query.Search, cancellationToken);
-
-                // Build the URL using the determined target
                 string apiUrl = BuildApiUrl(apiTarget);
-
-                // Fetch data using the constructed URL
                 var response = await FetchIpApiResponse(apiUrl, cancellationToken);
 
-                // Remove the initial placeholder result
-                fetchedResults.RemoveAt(0);
+                // --- Clear placeholder ---
+                fetchedResults.Clear();
 
                 if (response == null || string.IsNullOrEmpty(response.Ip))
                 {
@@ -102,123 +102,132 @@ namespace Flow.Launcher.Plugin.IPDetails
                      });
                      return fetchedResults; // Return early if no core IP info
                 }
-                
+
+                // --- 1. Core IP Info ---
                 fetchedResults.Add(new Result
                 {
-                    Title = response.Ip, // API response should have the resolved IP
-                    SubTitle = $"Details for: {apiTarget}", // Show what was originally looked up
+                    Title = response.Ip,
+                    SubTitle = $"Resolved IP for: {originalInput}",
                     IcoPath = Icon,
                     Action = CreateCopyAction(response.Ip),
-                    Score = 99
+                    Score = 100 // Highest score for primary info
                 });
 
-                // Check if Location is null before accessing its properties
+                // --- 2. Key Flags ---
+                var flagsResults = new List<Result>();
+                int flagScore = 98; // Start flags with high score
+
+                // Datacenter Flag
+                if (response.IsDatacenter) flagsResults.Add(new Result { Title = "Datacenter IP", SubTitle = "Belongs to a hosting provider/datacenter", IcoPath = Icon, Action = CreateCopyAction("Datacenter IP"), Score = flagScore-- });
+
+                // VPN Flag (handle bool and Vpn object)
+                string vpnTitle = null; string vpnSubtitle = null; string vpnCopy = null;
+                 if (response.IsVpn is bool vpnBool && vpnBool) { vpnTitle = "VPN Detected"; vpnSubtitle = "IP identified as a VPN"; vpnCopy = "VPN Detected"; }
+                 if (response.Vpn != null) { // Override with specific info if available
+                     vpnTitle = $"VPN: {response.Vpn.Service ?? "Unknown"}";
+                     vpnSubtitle = $"Provider: {response.Vpn.Service ?? "N/A"} ({response.Vpn.Url ?? ""}), Region: {response.Vpn.ExitNodeRegion ?? "N/A"}";
+                     vpnCopy = $"VPN: {response.Vpn.Service ?? "N/A"}";
+                 }
+                 if (vpnTitle != null) flagsResults.Add(new Result { Title = vpnTitle, SubTitle = vpnSubtitle, IcoPath = Icon, Action = CreateCopyAction(vpnCopy), Score = flagScore-- });
+
+                // Proxy Flag
+                if (response.IsProxy) flagsResults.Add(new Result { Title = "Proxy Detected", SubTitle = "IP identified as a proxy server", IcoPath = Icon, Action = CreateCopyAction("Proxy Detected"), Score = flagScore-- });
+
+                // TOR Flag
+                if (response.IsTor) flagsResults.Add(new Result { Title = "TOR Exit Node", SubTitle = "IP is a TOR exit node", IcoPath = Icon, Action = CreateCopyAction("TOR Exit Node"), Score = flagScore-- });
+
+                // Abuser Flag
+                if (response.IsAbuser) flagsResults.Add(new Result { Title = "Abuser Detected", SubTitle = "IP detected on abuse blacklists", IcoPath = Icon, Action = CreateCopyAction("Abuser Detected"), Score = flagScore-- });
+
+                // Crawler Flag (handle object type)
+                string crawlerName = null;
+                if (response.IsCrawler is string crawlerStr && !string.IsNullOrWhiteSpace(crawlerStr)) { crawlerName = crawlerStr; }
+                else if (response.IsCrawler is bool crawlerBool && crawlerBool) { crawlerName = "Generic Bot"; }
+                if (crawlerName != null) flagsResults.Add(new Result { Title = $"Crawler: {crawlerName}", SubTitle = "IP belongs to a known crawler/bot", IcoPath = Icon, Action = CreateCopyAction(crawlerName), Score = flagScore-- });
+
+                // Add other flags if desired (lower priority)
+                // if (response.IsMobile) flagsResults.Add(new Result { Title = "Mobile IP", ..., Score = flagScore-- });
+                // if (response.IsSatellite) flagsResults.Add(new Result { Title = "Satellite IP", ..., Score = flagScore-- });
+                // if (response.IsBogon) flagsResults.Add(new Result { Title = "Bogon IP", ..., Score = flagScore-- });
+
+                fetchedResults.AddRange(flagsResults);
+
+                // --- 3. Datacenter Specific Info (If applicable) ---
+                if (response.IsDatacenter && response.Datacenter != null)
+                {
+                    var dcLocationParts = new[] { response.Datacenter.City, response.Datacenter.Region, response.Datacenter.Country };
+                    var dcLocation = string.Join(", ", dcLocationParts.Where(s => !string.IsNullOrEmpty(s)));
+                    fetchedResults.Add(new Result {
+                        Title = $"Datacenter: {response.Datacenter.Datacenter ?? "N/A"}",
+                        SubTitle = $"Network: {response.Datacenter.Network ?? "N/A"}" + (string.IsNullOrWhiteSpace(dcLocation) ? "" : $", Location: {dcLocation}"),
+                        IcoPath = Icon,
+                        Action = CreateCopyAction($"{response.Datacenter.Datacenter ?? "N/A"}"),
+                        Score = 90 // Score below flags but still high
+                    });
+                }
+
+                // --- 4. Location Info ---
                 if (response.Location != null)
                 {
                     var locationParts = new[] { response.Location.City, response.Location.State, response.Location.Country };
                     var location = string.Join(", ", locationParts.Where(l => !string.IsNullOrEmpty(l)));
-
                     if (!string.IsNullOrWhiteSpace(location))
                     {
                         fetchedResults.Add(new Result
                         {
                             Title = location,
-                            SubTitle = "Location",
+                            SubTitle = "Approximate Location", // Simplified subtitle
                             IcoPath = Icon,
                             Action = CreateCopyAction(location),
-                            Score = 98
+                            Score = 85
                         });
                     }
 
-                     if (!string.IsNullOrWhiteSpace(response.Location.Timezone))
-                     {
+                    if (!string.IsNullOrWhiteSpace(response.Location.Timezone))
+                    {
                         fetchedResults.Add(new Result
                         {
                             Title = response.Location.Timezone,
-                            SubTitle = "Timezone" + (!string.IsNullOrWhiteSpace(response.Location.LocalTime) ? $" / {response.Location.LocalTime}" : ""),
+                            SubTitle = "Timezone" + (!string.IsNullOrWhiteSpace(response.Location.LocalTime) ? $" / Local: {response.Location.LocalTime.Split('+')[0].Split('-')[0]}" : ""), // Simplified local time display
                             IcoPath = Icon,
                             Action = CreateCopyAction(response.Location.Timezone),
-                            Score = 96
+                            Score = 80
                         });
-                     }
-
+                    }
+                     // Coordinates link - Lower priority
                      if (response.Location.Latitude != 0 || response.Location.Longitude != 0)
                      {
-                         var googleMapsLink = GenerateGoogleMapsLink(response.Location.LatitudeFormatted,
-                             response.Location.LongitudeFormatted);
-
+                         var googleMapsLink = GenerateGoogleMapsLink(response.Location.LatitudeFormatted, response.Location.LongitudeFormatted);
                          fetchedResults.Add(new Result
                          {
-                             Title =
-                                 $"Lat: {response.Location.LatitudeFormatted}, Lon: {response.Location.LongitudeFormatted}",
-                             SubTitle = "Click to view coordinate on Google Maps",
+                             Title = $"Lat/Lon: {response.Location.LatitudeFormatted}, {response.Location.LongitudeFormatted}",
+                             SubTitle = "Click to view on Google Maps",
                              IcoPath = Icon,
                              Action = CreateOpenBrowserAction(googleMapsLink),
-                             Score = 90
+                             Score = 70 // Lowest score
                          });
                     }
                 }
-                else {
-                     fetchedResults.Add(new Result
-                     {
-                         Title = $"Location info missing in API response for {apiTarget}.",
-                         SubTitle = "Location",
-                         IcoPath = Icon
-                     });
-                }
 
-                // Check if Asn is null before accessing its properties
+                // --- 5. ISP / ASN Org Info ---
                 if (response.Asn != null && !string.IsNullOrWhiteSpace(response.Asn.Org))
                 {
                     fetchedResults.Add(new Result
                     {
                         Title = response.Asn.Org,
-                        SubTitle = "ISP / Organization",
+                        // Display ASN Type if different from Datacenter type or if not datacenter
+                        SubTitle = $"ISP / Org (AS{response.Asn.Asn?.ToString() ?? "?"})" +
+                                   ((response.Asn.Type != null && (!response.IsDatacenter || response.Asn.Type != "hosting")) ? $" - Type: {response.Asn.Type}" : ""),
                         IcoPath = Icon,
-                        Action = CreateCopyAction(response.Asn.Org),
-                        Score = 97
+                        Action = CreateCopyAction($"{response.Asn.Org} (AS{response.Asn.Asn?.ToString() ?? "?"})"),
+                        Score = 84 // Below location, above timezone
                     });
-                } else {
-                     fetchedResults.Add(new Result
-                     {
-                         Title = $"ASN info missing in API response for {apiTarget}.",
-                         SubTitle = "ISP / Organization",
-                         IcoPath = Icon
-                     });
                 }
-
-                 // --- Flags processing ---
-                 var isVpnFromBoolean = response.IsVpn is bool vpnBool && vpnBool;
-                 var isVpnProviderAvailable = response.IsVpn is string vpnString && !string.IsNullOrWhiteSpace(vpnString);
-                 var isVpnString = isVpnFromBoolean ? "VPN Detected" : (isVpnProviderAvailable ? response.IsVpn.ToString() : string.Empty);
-
-                 var flags = new (string Title, bool IsValid, string Subtitle)[]
-                 {
-                    ("Bogon", response.IsBogon, "IP is bogon (e.g., private, reserved)"),
-                    ("Mobile", response.IsMobile, "IP is mobile (belongs to a mobile ISP)"),
-                    ("Crawler", response.IsCrawler, "IP belongs to a crawler / spider / bot"),
-                    ("Datacenter", response.IsDatacenter, "IP belongs to a Hosting Provider / Datacenter"),
-                    ("Tor", response.IsTor, "IP is a TOR exit node"),
-                    ("Proxy", response.IsProxy, "IP is a proxy"),
-                    (isVpnString, !string.IsNullOrEmpty(isVpnString), isVpnProviderAvailable ? $"VPN Provider: {isVpnString}" : "IP is likely a VPN"),
-                    ("Abuser", response.IsAbuser, "IP detected on abuse blacklists")
-                 };
-
-                 fetchedResults.AddRange(flags.Where(flag => flag.IsValid && !string.IsNullOrEmpty(flag.Title))
-                     .Select(flag => new Result
-                     {
-                         Title = flag.Title,
-                         SubTitle = flag.Subtitle,
-                         IcoPath = Icon,
-                         Action = CreateCopyAction(flag.Title + ": " + flag.Subtitle),
-                         Score = 95 // Assign consistent score for flags
-                     }));
             }
             catch (OperationCanceledException)
             {
-                 // Query was cancelled (e.g., user typed something else)
-                 // Return empty list or a specific cancellation message
-                 fetchedResults.Add(new Result { Title = "IP details query cancelled", SubTitle = $"Query: {apiTarget}", IcoPath = Icon });
+                 fetchedResults.Clear();
+                 fetchedResults.Add(new Result { Title = "Query cancelled", SubTitle = $"Lookup for: {originalInput}", IcoPath = Icon });
             }
             catch (Exception ex)
             {
@@ -234,7 +243,7 @@ namespace Flow.Launcher.Plugin.IPDetails
                 });
             }
 
-            // Return the final list of results (either details or an error message)
+             // Return the final list of results (either details or an error message)
              if (!fetchedResults.Any())
              {
                 // Should generally not happen due to error handling, but as a fallback
