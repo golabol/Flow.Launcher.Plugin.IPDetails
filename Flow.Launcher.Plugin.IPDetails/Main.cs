@@ -21,6 +21,16 @@ namespace Flow.Launcher.Plugin.IPDetails
         private PluginInitContext Context { get; set; }
         private static readonly HttpClient HttpClient = new();
 
+        // List of service URLs to try, in order of preference.
+        // Using HTTPS where available. All these return plain text IP.
+        private static readonly List<string> IpServiceUrls = new List<string>
+        {
+            "https://api.ipify.org",    // Primary choice: Simple, fast, reliable
+            "https://ipinfo.io/ip",    // Good fallback
+            "https://ipv4.icanhazip.com"   // Another solid option
+            // Add more plain-text IP services here if needed
+        };
+
         /// <summary>
         /// <a href="https://www.flaticon.com/free-icons/ip" title="IP icons">IP icons created by Design Circle - Flaticon</a>
         /// </summary>
@@ -191,13 +201,78 @@ namespace Flow.Launcher.Plugin.IPDetails
             return $"https://www.google.com/maps?q={latitude},{longitude}";
         }
 
+        /// <summary>
+        /// Attempts to get the public IP address by trying multiple free services sequentially.
+        /// </summary>
+        /// <param name="timeoutSeconds">Optional timeout per service request.</param>
+        /// <returns>The public IP address as a string, or null if all services failed or timed out.</returns>
+        public static async Task<string?> GetPublicIpAddressAsync(int timeoutSeconds = 5)
+        {
+            var errors = new List<string>();
+            // Use a CancellationTokenSource for timeout per request
+            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
+            {
+                foreach (var url in IpServiceUrls)
+                {
+                    try
+                    {
+                        // Make the request with the cancellation token
+                        string potentialIp = (await httpClient.GetStringAsync(url, cts.Token)).Trim();
+    
+                        // Basic validation: Check if the response looks like a valid IP address
+                        if (!string.IsNullOrEmpty(potentialIp) && IPAddress.TryParse(potentialIp, out _))
+                        {
+                            return potentialIp; // Success! Return the first valid IP found.
+                        }
+                        else 
+                        {
+                            errors.Add($"Service {url} returned invalid data: '{potentialIp}'");
+                        }
+                    }
+                    catch (OperationCanceledException ex) when (cts.IsCancellationRequested)
+                    {
+                        // This specifically catches the timeout we set
+                        errors.Add($"Request to {url} timed out after {timeoutSeconds} seconds.");
+                    }
+                    catch (HttpRequestException ex)
+                    {
+                        // Network error, DNS error, service unavailable, etc.
+                        errors.Add($"Failed to get IP from {url}. Error: {ex.Message}");
+                    }
+                    catch (Exception ex) // Catch any other unexpected errors
+                    {
+                        errors.Add($"An unexpected error occurred trying {url}. Error: {ex.Message}");
+                    }
+                    // If we reach here, the current service failed or timed out,
+                    // loop will continue to the next service.
+                }
+            } // CancellationTokenSource is disposed here
+    
+            // If the loop completes without returning, all services failed.
+            // Throw an exception containing the *last* error encountered.
+            if (errors.Any()) // Check if there are any errors before accessing Last()
+            {
+                 // Consider joining all errors for more context:
+                 // string allErrors = string.Join("; ", errors);
+                 // throw new Exception($"Failed to retrieve public IP from all services. Errors: {allErrors}");
+    
+                 // Throwing only the last error as per your code:
+                 throw new Exception($"Failed to retrieve public IP. Last error: {errors.Last()}");
+            }
+            else
+            {
+                // This case is unlikely with the current logic but handles completeness
+                throw new Exception("Failed to retrieve public IP from all services for an unknown reason (no specific errors recorded).");
+            }
+        }
+
         private static async Task<string> GenerateUrl(string ip)
         {
             var (isValid, ipFormatted) = IsValidIPv4(ip);
 
             if (string.IsNullOrEmpty(ip) || !isValid)
             {
-                ipFormatted = (await HttpClient.GetStringAsync("http://ipv4.icanhazip.com")).Trim();
+                ipFormatted = await GetPublicIpAddressAsync(); // Call the robust fetcher
             }
 
             var apiKeyQueryString = string.IsNullOrEmpty(_settings.ApiKey)
